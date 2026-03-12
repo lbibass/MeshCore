@@ -53,13 +53,24 @@ void RadioLibWrapper::triggerNoiseFloorCalibrate(int threshold) {
   }
 }
 
+void RadioLibWrapper::doResetAGC() {
+  _radio->sleep();  // warm sleep to reset analog frontend
+}
+
 void RadioLibWrapper::resetAGC() {
   // make sure we're not mid-receive of packet!
   if ((state & STATE_INT_READY) != 0 || isReceivingPacket()) return;
 
-  // NOTE: according to higher powers, just issuing RadioLib's startReceive() will reset the AGC.
-  //      revisit this if a better impl is discovered.
+  doResetAGC();
   state = STATE_IDLE;   // trigger a startReceive()
+
+  // Reset noise floor sampling so it reconverges from scratch.
+  // Without this, a stuck _noise_floor of -120 makes the sampling threshold
+  // too low (-106) to accept normal samples (~-105), self-reinforcing the
+  // stuck value even after the receiver has recovered.
+  _noise_floor = 0;
+  _num_floor_samples = 0;
+  _floor_sample_sum = 0;
 }
 
 void RadioLibWrapper::loop() {
@@ -157,10 +168,20 @@ void RadioLibWrapper::onSendFinished() {
   state = STATE_IDLE;
 }
 
+int16_t RadioLibWrapper::performChannelScan() {
+  return _radio->scanChannel();
+}
+
 bool RadioLibWrapper::isChannelActive() {
-  return _threshold == 0 
-          ? false    // interference check is disabled
-          : getCurrentRSSI() > _noise_floor + _threshold;
+  if (_threshold == 0) return false;    // interference check is disabled
+
+  int16_t result = performChannelScan();
+  // scanChannel() triggers DIO interrupt (CAD done) which sets STATE_INT_READY
+  // via setFlag() ISR. Clear it before restarting RX so recvRaw() doesn't
+  // try to read a non-existent packet and count a spurious recv error.
+  state = STATE_IDLE;
+  startRecv();
+  return result != RADIOLIB_CHANNEL_FREE;
 }
 
 float RadioLibWrapper::getLastRSSI() const {

@@ -222,12 +222,14 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.rx_delay_base, sizeof(_prefs.rx_delay_base));             // 72
     file.read((uint8_t *)&_prefs.advert_loc_policy, sizeof(_prefs.advert_loc_policy));     // 76
     file.read((uint8_t *)&_prefs.multi_acks, sizeof(_prefs.multi_acks));                   // 77
-    file.read(pad, 2);                                                                     // 78
+    file.read((uint8_t *)&_prefs.path_hash_mode, sizeof(_prefs.path_hash_mode));           // 78
+    file.read(pad, 1);                                                                     // 79
     file.read((uint8_t *)&_prefs.ble_pin, sizeof(_prefs.ble_pin));                         // 80
     file.read((uint8_t *)&_prefs.buzzer_quiet, sizeof(_prefs.buzzer_quiet));               // 84
     file.read((uint8_t *)&_prefs.gps_enabled, sizeof(_prefs.gps_enabled));                 // 85
     file.read((uint8_t *)&_prefs.gps_interval, sizeof(_prefs.gps_interval));               // 86
     file.read((uint8_t *)&_prefs.autoadd_config, sizeof(_prefs.autoadd_config));           // 87
+    file.read((uint8_t *)&_prefs.autoadd_max_hops, sizeof(_prefs.autoadd_max_hops));       // 88
 
     file.close();
   }
@@ -257,12 +259,14 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.rx_delay_base, sizeof(_prefs.rx_delay_base));             // 72
     file.write((uint8_t *)&_prefs.advert_loc_policy, sizeof(_prefs.advert_loc_policy));     // 76
     file.write((uint8_t *)&_prefs.multi_acks, sizeof(_prefs.multi_acks));                   // 77
-    file.write(pad, 2);                                                                     // 78
+    file.write((uint8_t *)&_prefs.path_hash_mode, sizeof(_prefs.path_hash_mode));           // 78
+    file.write(pad, 1);                                                                     // 79
     file.write((uint8_t *)&_prefs.ble_pin, sizeof(_prefs.ble_pin));                         // 80
     file.write((uint8_t *)&_prefs.buzzer_quiet, sizeof(_prefs.buzzer_quiet));               // 84
     file.write((uint8_t *)&_prefs.gps_enabled, sizeof(_prefs.gps_enabled));                 // 85
     file.write((uint8_t *)&_prefs.gps_interval, sizeof(_prefs.gps_interval));               // 86
     file.write((uint8_t *)&_prefs.autoadd_config, sizeof(_prefs.autoadd_config));           // 87
+    file.write((uint8_t *)&_prefs.autoadd_max_hops, sizeof(_prefs.autoadd_max_hops));      // 88
 
     file.close();
   }
@@ -371,6 +375,140 @@ void DataStore::saveChannels(DataStoreHost* host) {
     }
     file.close();
   }
+}
+
+void DataStore::loadNonces(DataStoreHost* host) {
+  File file = openRead(_getContactsChannelsFS(), "/nonces");
+  if (file) {
+    uint8_t rec[6];  // 4-byte pub_key prefix + 2-byte nonce
+    while (file.read(rec, 6) == 6) {
+      uint16_t nonce;
+      memcpy(&nonce, &rec[4], 2);
+      host->onNonceLoaded(rec, nonce);
+    }
+    file.close();
+  }
+}
+
+bool DataStore::saveNonces(DataStoreHost* host) {
+  File file = openWrite(_getContactsChannelsFS(), "/nonces");
+  if (file) {
+    int idx = 0;
+    uint8_t pub_key_prefix[4];
+    uint16_t nonce;
+    while (host->getNonceForSave(idx, pub_key_prefix, &nonce)) {
+      file.write(pub_key_prefix, 4);
+      file.write((uint8_t*)&nonce, 2);
+      idx++;
+    }
+    file.close();
+    return true;
+  }
+  return false;
+}
+
+void DataStore::loadSessionKeys(DataStoreHost* host) {
+  File file = openRead(_getContactsChannelsFS(), "/sess_keys");
+  if (!file) return;
+  while (true) {
+    uint8_t rec[SESSION_KEY_RECORD_MIN_SIZE];
+    if (file.read(rec, SESSION_KEY_RECORD_MIN_SIZE) != SESSION_KEY_RECORD_MIN_SIZE) break;
+    uint8_t flags = rec[4];
+    uint16_t nonce;
+    memcpy(&nonce, &rec[5], 2);
+    uint8_t prev_key[SESSION_KEY_SIZE];
+    if (flags & SESSION_FLAG_PREV_VALID) {
+      if (file.read(prev_key, SESSION_KEY_SIZE) != SESSION_KEY_SIZE) break;
+    } else {
+      memset(prev_key, 0, SESSION_KEY_SIZE);
+    }
+    host->onSessionKeyLoaded(rec, flags, nonce, &rec[7], prev_key);
+  }
+  file.close();
+}
+
+bool DataStore::saveSessionKeys(DataStoreHost* host) {
+  FILESYSTEM* fs = _getContactsChannelsFS();
+
+  // 1. Read old flash file into buffer (variable-length records)
+  uint8_t old_buf[MAX_SESSION_KEYS_FLASH * SESSION_KEY_RECORD_SIZE];
+  int old_len = 0;
+  File rf = openRead(fs, "/sess_keys");
+  if (rf) {
+    while (true) {
+      if (old_len + SESSION_KEY_RECORD_MIN_SIZE > (int)sizeof(old_buf)) break;
+      if (rf.read(&old_buf[old_len], SESSION_KEY_RECORD_MIN_SIZE) != SESSION_KEY_RECORD_MIN_SIZE) break;
+      uint8_t flags = old_buf[old_len + 4];
+      int rec_len = SESSION_KEY_RECORD_MIN_SIZE;
+      if (flags & SESSION_FLAG_PREV_VALID) {
+        if (old_len + SESSION_KEY_RECORD_SIZE > (int)sizeof(old_buf)) break;
+        if (rf.read(&old_buf[old_len + SESSION_KEY_RECORD_MIN_SIZE], SESSION_KEY_SIZE) != SESSION_KEY_SIZE) break;
+        rec_len = SESSION_KEY_RECORD_SIZE;
+      }
+      old_len += rec_len;
+    }
+    rf.close();
+  }
+
+  // 2. Write merged file
+  File wf = openWrite(fs, "/sess_keys");
+  if (!wf) return false;
+
+  // Write kept old records (variable-length)
+  int pos = 0;
+  while (pos + SESSION_KEY_RECORD_MIN_SIZE <= old_len) {
+    uint8_t* rec = &old_buf[pos];
+    uint8_t flags = rec[4];
+    int rec_len = (flags & SESSION_FLAG_PREV_VALID) ? SESSION_KEY_RECORD_SIZE : SESSION_KEY_RECORD_MIN_SIZE;
+    if (pos + rec_len > old_len) break;
+    if (!host->isSessionKeyInRAM(rec) && !host->isSessionKeyRemoved(rec)) {
+      wf.write(rec, rec_len);
+    }
+    pos += rec_len;
+  }
+  // Write current RAM entries (variable-length)
+  for (int idx = 0; idx < MAX_SESSION_KEYS_RAM; idx++) {
+    uint8_t pk[4]; uint8_t fl; uint16_t n; uint8_t sk[32]; uint8_t psk[32];
+    if (!host->getSessionKeyForSave(idx, pk, &fl, &n, sk, psk)) continue;
+    wf.write(pk, 4); wf.write(&fl, 1); wf.write((uint8_t*)&n, 2);
+    wf.write(sk, 32);
+    if (fl & SESSION_FLAG_PREV_VALID) {
+      wf.write(psk, 32);
+    }
+  }
+  wf.close();
+  return true;
+}
+
+bool DataStore::loadSessionKeyByPrefix(const uint8_t* prefix,
+    uint8_t* flags, uint16_t* nonce, uint8_t* session_key, uint8_t* prev_session_key) {
+  File f = openRead(_getContactsChannelsFS(), "/sess_keys");
+  if (!f) return false;
+  while (true) {
+    uint8_t rec[SESSION_KEY_RECORD_MIN_SIZE];
+    if (f.read(rec, SESSION_KEY_RECORD_MIN_SIZE) != SESSION_KEY_RECORD_MIN_SIZE) break;
+    uint8_t rec_flags = rec[4];
+    bool has_prev = (rec_flags & SESSION_FLAG_PREV_VALID);
+    if (memcmp(rec, prefix, 4) == 0) {
+      *flags = rec_flags;
+      memcpy(nonce, &rec[5], 2);
+      memcpy(session_key, &rec[7], SESSION_KEY_SIZE);
+      if (has_prev) {
+        if (f.read(prev_session_key, SESSION_KEY_SIZE) != SESSION_KEY_SIZE) break;
+      } else {
+        memset(prev_session_key, 0, SESSION_KEY_SIZE);
+      }
+      f.close();
+      return true;
+    }
+    // Skip prev_key if present
+    if (has_prev) {
+      uint8_t skip[SESSION_KEY_SIZE];
+      if (f.read(skip, SESSION_KEY_SIZE) != SESSION_KEY_SIZE) break;
+    }
+  }
+  f.close();
+  return false;
 }
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -563,6 +701,7 @@ bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src
 bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
   return true; // this is just a stub on NRF52/STM32 platforms
 }
+void DataStore::cleanOrphanBlobs(DataStoreHost* host) {}
 #else
 inline void makeBlobPath(const uint8_t key[], int key_len, char* path, size_t path_size) {
   char fname[18];
@@ -606,7 +745,39 @@ bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
   makeBlobPath(key, key_len, path, sizeof(path));
 
   _fs->remove(path);
-  
+
   return true; // return true even if file did not exist
+}
+
+void DataStore::cleanOrphanBlobs(DataStoreHost* host) {
+  if (_fs->exists("/bl/.cleaned")) return;
+  MESH_DEBUG_PRINTLN("Cleaning orphan blobs...");
+  File root = openRead("/bl");
+  if (root) {
+    for (File f = root.openNextFile(); f; f = root.openNextFile()) {
+      const char* name = f.name();
+      f.close();
+      if (name[0] == '.' || strlen(name) != 16) continue;
+      uint8_t file_key[8];
+      if (!mesh::Utils::fromHex(file_key, 8, name)) continue;
+      bool found = false;
+      ContactInfo c;
+      for (uint32_t i = 0; host->getContactForSave(i, c) && !found; i++) {
+        found = (memcmp(file_key, c.id.pub_key, 8) == 0);
+      }
+      if (!found) {
+        char path[24];
+        sprintf(path, "/bl/%s", name);
+        _fs->remove(path);
+      }
+    }
+    root.close();
+  }
+#if defined(ESP32)
+  File m = _fs->open("/bl/.cleaned", "w", true);
+#else
+  File m = _fs->open("/bl/.cleaned", "w");
+#endif
+  if (m) m.close();
 }
 #endif

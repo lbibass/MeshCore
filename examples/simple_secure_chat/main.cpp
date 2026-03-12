@@ -158,13 +158,8 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
   }
 
   void setClock(uint32_t timestamp) {
-    uint32_t curr = getRTCClock()->getCurrentTime();
-    if (timestamp > curr) {
-      getRTCClock()->setCurrentTime(timestamp);
-      Serial.println("   (OK - clock set!)");
-    } else {
-      Serial.println("   (ERR: clock cannot go backwards)");
-    }
+    getRTCClock()->setCurrentTime(timestamp);
+    Serial.println("   (OK - clock set!)");
   }
 
   void importCard(const char* command) {
@@ -213,7 +208,7 @@ protected:
   }
 
   void onContactPathUpdated(const ContactInfo& contact) override {
-    Serial.printf("PATH to: %s, path_len=%d\n", contact.name, (int32_t) contact.out_path_len);
+    Serial.printf("PATH to: %s, path_len=%d\n", contact.name, (uint32_t) contact.out_path_len);
     saveContacts();
   }
 
@@ -262,12 +257,13 @@ protected:
     // not supported
   }
 
-  uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const override {
-    return SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * pkt_airtime_millis);
+  uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t attempt = 0) const override {
+    return (SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * pkt_airtime_millis)) * (attempt + 1);
   }
   uint32_t calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const override {
+    uint8_t path_hash_count = path_len & 63;
     return SEND_TIMEOUT_BASE_MILLIS + 
-         ( (pkt_airtime_millis*DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS) * (path_len + 1));
+         ( (pkt_airtime_millis*DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS) * (path_hash_count + 1));
   }
 
   void onSendTimeout() override {
@@ -280,7 +276,7 @@ public:
   {
     // defaults
     memset(&_prefs, 0, sizeof(_prefs));
-    _prefs.airtime_factor = 2.0;    // one third
+    _prefs.airtime_factor = 1.0;
     strcpy(_prefs.node_name, "NONAME");
     _prefs.freq = LORA_FREQ;
     _prefs.tx_power_dbm = LORA_TX_POWER;

@@ -4,18 +4,38 @@
 void SerialWifiInterface::begin(int port) {
   // wifi setup is handled outside of this class, only starts the server
   server.begin(port);
+
+  // Store WiFi credentials for re-enable
+#ifdef WIFI_SSID
+  _ssid = WIFI_SSID;
+  _password = WIFI_PWD;
+  _isEnabled = true;  // WiFi starts enabled
+#else
+  _ssid = nullptr;
+  _password = nullptr;
+#endif
 }
 
 // ---------- public methods
-void SerialWifiInterface::enable() { 
+void SerialWifiInterface::enable() {
   if (_isEnabled) return;
 
   _isEnabled = true;
   clearBuffers();
+
+  // Re-enable WiFi with stored credentials
+  if (_ssid != nullptr && _password != nullptr) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(_ssid, _password);
+  }
 }
 
 void SerialWifiInterface::disable() {
   _isEnabled = false;
+
+  // Actually turn off WiFi to save power
+  WiFi.disconnect(true);  // Disconnect and clear config
+  WiFi.mode(WIFI_OFF);    // Turn off WiFi radio
 }
 
 size_t SerialWifiInterface::writeFrame(const uint8_t src[], size_t len) {
@@ -131,9 +151,9 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
         if(frame_length > MAX_FRAME_SIZE){
           WIFI_DEBUG_PRINTLN("Skipping frame: length=%d is larger than MAX_FRAME_SIZE=%d", frame_length, MAX_FRAME_SIZE);
           while(frame_length > 0){
-            uint8_t skip[1];
-            int skipped = client.read(skip, 1);
-            frame_length -= skipped;
+            int skipped = client.read();
+            if(skipped < 0) break;  // read error, stop draining
+            frame_length--;
           }
           resetReceivedFrameHeader();
           return 0;
@@ -144,9 +164,9 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
         if(frame_type != '<'){
           WIFI_DEBUG_PRINTLN("Skipping frame: type=0x%x is unexpected", frame_type);
           while(frame_length > 0){
-            uint8_t skip[1];
-            int skipped = client.read(skip, 1);
-            frame_length -= skipped;
+            int skipped = client.read();
+            if(skipped < 0) break;  // read error, stop draining
+            frame_length--;
           }
           resetReceivedFrameHeader();
           return 0;

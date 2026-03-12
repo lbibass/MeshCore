@@ -1,4 +1,6 @@
 #include "SerialBLEInterface.h"
+#include "esp_mac.h"
+#include <helpers/ArduinoHelpers.h>
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -31,7 +33,7 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   sec.setStaticPIN(pin_code);
   sec.setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
 
-  //BLEDevice::setPower(ESP_PWR_LVL_N8);
+  BLEDevice::setPower(ESP_PWR_LVL_P9);
 
   // Create the BLE Server
   pServer = BLEDevice::createServer();
@@ -137,12 +139,15 @@ void SerialBLEInterface::enable() {
   // Start the service
   pService->start();
 
+  BLEDevice::setPower(ESP_PWR_LVL_P9);
+
   // Start advertising
 
   //pServer->getAdvertising()->setMinInterval(500);
   //pServer->getAdvertising()->setMaxInterval(1000);
 
   pServer->getAdvertising()->start();
+  BLEDevice::setPower(ESP_PWR_LVL_P9);
   adv_restart_time = 0;
 }
 
@@ -182,12 +187,12 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 #define  BLE_WRITE_MIN_INTERVAL   60
 
 bool SerialBLEInterface::isWriteBusy() const {
-  return millis() < _last_write + BLE_WRITE_MIN_INTERVAL;   // still too soon to start another write?
+  return !millis_passed(_last_write + BLE_WRITE_MIN_INTERVAL);   // still too soon to start another write?
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   if (send_queue_len > 0   // first, check send queue
-    && millis() >= _last_write + BLE_WRITE_MIN_INTERVAL    // space the writes apart
+    && millis_passed(_last_write + BLE_WRITE_MIN_INTERVAL)    // space the writes apart
   ) {
     _last_write = millis();
     pTxCharacteristic->setValue(send_queue[0].buf, send_queue[0].len);
@@ -237,10 +242,11 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     oldDeviceConnected = deviceConnected;
   }
 
-  if (adv_restart_time && millis() >= adv_restart_time) {
+  if (adv_restart_time && millis_passed(adv_restart_time)) {
     if (pServer->getConnectedCount() == 0) {
       BLE_DEBUG_PRINTLN("SerialBLEInterface -> re-starting advertising");
       pServer->getAdvertising()->start();  // re-Start advertising
+      BLEDevice::setPower(ESP_PWR_LVL_P9);
     }
     adv_restart_time = 0;
   }
@@ -249,4 +255,8 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
 
 bool SerialBLEInterface::isConnected() const {
   return deviceConnected;  //pServer != NULL && pServer->getConnectedCount() > 0;
+}
+
+bool SerialBLEInterface::hasPendingConnection() const {
+  return pServer != NULL && pServer->getConnectedCount() > 0;
 }

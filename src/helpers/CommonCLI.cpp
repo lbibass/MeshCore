@@ -4,6 +4,10 @@
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
 
+#ifndef BRIDGE_MAX_BAUD
+#define BRIDGE_MAX_BAUD 115200
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -63,7 +67,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->multi_acks, sizeof(_prefs->multi_acks));                         // 115
     file.read((uint8_t *)&_prefs->bw, sizeof(_prefs->bw));                                         // 116
     file.read((uint8_t *)&_prefs->agc_reset_interval, sizeof(_prefs->agc_reset_interval));         // 120
-    file.read(pad, 3);                                                                             // 121
+    file.read((uint8_t *)&_prefs->path_hash_mode, sizeof(_prefs->path_hash_mode));                 // 121
+    file.read((uint8_t *)&_prefs->loop_detect, sizeof(_prefs->loop_detect));                       // 122
+    file.read(pad, 1);                                                                             // 123
     file.read((uint8_t *)&_prefs->flood_max, sizeof(_prefs->flood_max));                           // 124
     file.read((uint8_t *)&_prefs->flood_advert_interval, sizeof(_prefs->flood_advert_interval));   // 125
     file.read((uint8_t *)&_prefs->interference_threshold, sizeof(_prefs->interference_threshold)); // 126
@@ -95,12 +101,13 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->tx_power_dbm = constrain(_prefs->tx_power_dbm, -9, 30);
     _prefs->multi_acks = constrain(_prefs->multi_acks, 0, 1);
     _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
+    _prefs->path_hash_mode = constrain(_prefs->path_hash_mode, 0, 2);   // NOTE: mode 3 reserved for future
 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
     _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
-    _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, 115200);
+    _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, BRIDGE_MAX_BAUD);
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
 
     _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
@@ -147,7 +154,9 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->multi_acks, sizeof(_prefs->multi_acks));                         // 115
     file.write((uint8_t *)&_prefs->bw, sizeof(_prefs->bw));                                         // 116
     file.write((uint8_t *)&_prefs->agc_reset_interval, sizeof(_prefs->agc_reset_interval));         // 120
-    file.write(pad, 3);                                                                             // 121
+    file.write((uint8_t *)&_prefs->path_hash_mode, sizeof(_prefs->path_hash_mode));                 // 121
+    file.write((uint8_t *)&_prefs->loop_detect, sizeof(_prefs->loop_detect));                       // 122
+    file.write(pad, 1);                                                                             // 123
     file.write((uint8_t *)&_prefs->flood_max, sizeof(_prefs->flood_max));                           // 124
     file.write((uint8_t *)&_prefs->flood_advert_interval, sizeof(_prefs->flood_advert_interval));   // 125
     file.write((uint8_t *)&_prefs->interference_threshold, sizeof(_prefs->interference_threshold)); // 126
@@ -183,37 +192,43 @@ void CommonCLI::savePrefs() {
 uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
   if (_prefs->advert_loc_policy == ADVERT_LOC_NONE) {
     AdvertDataBuilder builder(node_type, _prefs->node_name);
+    builder.setFeat1(FEAT1_AEAD_SUPPORT);
     return builder.encodeTo(app_data);
   } else if (_prefs->advert_loc_policy == ADVERT_LOC_SHARE) {
     AdvertDataBuilder builder(node_type, _prefs->node_name, _sensors->node_lat, _sensors->node_lon);
+    builder.setFeat1(FEAT1_AEAD_SUPPORT);
     return builder.encodeTo(app_data);
   } else {
     AdvertDataBuilder builder(node_type, _prefs->node_name, _prefs->node_lat, _prefs->node_lon);
+    builder.setFeat1(FEAT1_AEAD_SUPPORT);
     return builder.encodeTo(app_data);
   }
 }
 
 void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, char* reply) {
-    if (memcmp(command, "reboot", 6) == 0) {
+    if (memcmp(command, "poweroff", 8) == 0 || memcmp(command, "shutdown", 8) == 0) {
+      _board->powerOff();  // doesn't return
+    } else if (memcmp(command, "reboot", 6) == 0) {
+      _callbacks->onBeforeReboot();
       _board->reboot();  // doesn't return
     } else if (memcmp(command, "clkreboot", 9) == 0) {
       // Reset clock
       getRTCClock()->setCurrentTime(1715770351);  // 15 May 2024, 8:50pm
+      _callbacks->onBeforeReboot();
       _board->reboot();  // doesn't return
+     } else if (memcmp(command, "advert.zerohop", 14) == 0 && (command[14] == 0 || command[14] == ' ')) {
+      // send zerohop advert
+      _callbacks->sendSelfAdvertisement(1500, false);  // longer delay, give CLI response time to be sent first
+      strcpy(reply, "OK - zerohop advert sent");
     } else if (memcmp(command, "advert", 6) == 0) {
       // send flood advert
       _callbacks->sendSelfAdvertisement(1500, true);  // longer delay, give CLI response time to be sent first
       strcpy(reply, "OK - Advert sent");
     } else if (memcmp(command, "clock sync", 10) == 0) {
-      uint32_t curr = getRTCClock()->getCurrentTime();
-      if (sender_timestamp > curr) {
-        getRTCClock()->setCurrentTime(sender_timestamp + 1);
-        uint32_t now = getRTCClock()->getCurrentTime();
-        DateTime dt = DateTime(now);
-        sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
-      } else {
-        strcpy(reply, "ERR: clock cannot go backwards");
-      }
+      getRTCClock()->setCurrentTime(sender_timestamp + 1);
+      uint32_t now = getRTCClock()->getCurrentTime();
+      DateTime dt = DateTime(now);
+      sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
     } else if (memcmp(command, "start ota", 9) == 0) {
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
@@ -224,15 +239,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       sprintf(reply, "%02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
     } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
       uint32_t secs = _atoi(&command[5]);
-      uint32_t curr = getRTCClock()->getCurrentTime();
-      if (secs > curr) {
-        getRTCClock()->setCurrentTime(secs);
-        uint32_t now = getRTCClock()->getCurrentTime();
-        DateTime dt = DateTime(now);
-        sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
-      } else {
-        strcpy(reply, "(ERR: clock cannot go backwards)");
-      }
+      getRTCClock()->setCurrentTime(secs);
+      uint32_t now = getRTCClock()->getCurrentTime();
+      DateTime dt = DateTime(now);
+      sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
     } else if (memcmp(command, "neighbors", 9) == 0) {
       _callbacks->formatNeighborsReply(reply);
     } else if (memcmp(command, "neighbor.remove ", 16) == 0) {
@@ -274,8 +284,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
      */
     } else if (memcmp(command, "get ", 4) == 0) {
       const char* config = &command[4];
-      if (memcmp(config, "af", 2) == 0) {
-        sprintf(reply, "> %s", StrHelper::ftoa(_prefs->airtime_factor));
+      if (memcmp(config, "dutycycle", 8) == 0) {
+        float dc = 100.0f / (_prefs->airtime_factor + 1.0f);
+        int dc_int = (int)dc;
+        int dc_frac = (int)((dc - dc_int) * 10.0f + 0.5f);
+        sprintf(reply, "> %d.%d%%", dc_int, dc_frac);
+      } else if (memcmp(config, "af", 2) == 0) {
+        sprintf(reply, "> %s (deprecated, use 'get dutycycle')", StrHelper::ftoa(_prefs->airtime_factor));
       } else if (memcmp(config, "int.thresh", 10) == 0) {
         sprintf(reply, "> %d", (uint32_t) _prefs->interference_threshold);
       } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
@@ -290,7 +305,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         sprintf(reply, "> %d", ((uint32_t) _prefs->advert_interval) * 2);
       } else if (memcmp(config, "guest.password", 14) == 0) {
         sprintf(reply, "> %s", _prefs->guest_password);
-      } else if (sender_timestamp == 0 && memcmp(config, "prv.key", 7) == 0) {  // from serial command line only
+      } else if (memcmp(config, "prv.key", 7) == 0) {
         uint8_t prv_key[PRV_KEY_SIZE];
         int len = _callbacks->getSelfId().writeTo(prv_key, PRV_KEY_SIZE);
         mesh::Utils::toHex(tmp, prv_key, len);
@@ -325,6 +340,18 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           sp++;
         }
         *reply = 0;  // set null terminator
+      } else if (memcmp(config, "path.hash.mode", 14) == 0) {
+        sprintf(reply, "> %d", (uint32_t)_prefs->path_hash_mode);
+      } else if (memcmp(config, "loop.detect", 11) == 0) {
+        if (_prefs->loop_detect == LOOP_DETECT_OFF) {
+          strcpy(reply, "> off");
+        } else if (_prefs->loop_detect == LOOP_DETECT_MINIMAL) {
+          strcpy(reply, "> minimal");
+        } else if (_prefs->loop_detect == LOOP_DETECT_MODERATE) {
+          strcpy(reply, "> moderate");
+        } else {
+          strcpy(reply, "> strict");
+        }
       } else if (memcmp(config, "tx", 2) == 0 && (config[2] == 0 || config[2] == ' ')) {
         sprintf(reply, "> %d", (int32_t) _prefs->tx_power_dbm);
       } else if (memcmp(config, "freq", 4) == 0) {
@@ -362,6 +389,17 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       } else if (memcmp(config, "bridge.secret", 13) == 0) {
         sprintf(reply, "> %s", _prefs->bridge_secret);
 #endif
+      } else if (memcmp(config, "bootloader.ver", 14) == 0) {
+      #ifdef NRF52_PLATFORM
+          char ver[32];
+          if (_board->getBootloaderVersion(ver, sizeof(ver))) {
+              sprintf(reply, "> %s", ver);
+          } else {
+              strcpy(reply, "> unknown");
+          }
+      #else
+          strcpy(reply, "ERROR: unsupported");
+      #endif
       } else if (memcmp(config, "adc.multiplier", 14) == 0) {
         float adc_mult = _board->getAdcMultiplier();
         if (adc_mult == 0.0f) {
@@ -404,10 +442,25 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
      */
     } else if (memcmp(command, "set ", 4) == 0) {
       const char* config = &command[4];
-      if (memcmp(config, "af ", 3) == 0) {
+      if (memcmp(config, "dutycycle ", 9) == 0) {
+        float dc = atof(&config[9]);
+        if (dc < 10 || dc > 100) {
+          strcpy(reply, "ERROR: dutycycle must be 10-100");
+        } else {
+          _prefs->airtime_factor = (100.0f / dc) - 1.0f;
+          savePrefs();
+          float actual = 100.0f / (_prefs->airtime_factor + 1.0f);
+          int a_int = (int)actual;
+          int a_frac = (int)((actual - a_int) * 10.0f + 0.5f);
+          sprintf(reply, "OK - %d.%d%%", a_int, a_frac);
+        }
+      } else if (memcmp(config, "af ", 3) == 0) {
         _prefs->airtime_factor = atof(&config[3]);
         savePrefs();
-        strcpy(reply, "OK");
+        float actual = 100.0f / (_prefs->airtime_factor + 1.0f);
+        int a_int = (int)actual;
+        int a_frac = (int)((actual - a_int) * 10.0f + 0.5f);
+        sprintf(reply, "OK - %d.%d%% (deprecated, use 'set dutycycle')", a_int, a_frac);
       } else if (memcmp(config, "int.thresh ", 11) == 0) {
         _prefs->interference_threshold = atoi(&config[11]);
         savePrefs();
@@ -545,6 +598,36 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         *dp = 0;
         savePrefs();
         strcpy(reply, "OK");
+      } else if (memcmp(config, "path.hash.mode ", 15) == 0) {
+        config += 15;
+        uint8_t mode = atoi(config);
+        if (mode < 3) {
+          _prefs->path_hash_mode = mode;
+          savePrefs();
+          strcpy(reply, "OK");
+        } else {
+          strcpy(reply, "Error, must be 0,1, or 2");
+        }
+      } else if (memcmp(config, "loop.detect ", 12) == 0) {
+        config += 12;
+        uint8_t mode;
+        if (memcmp(config, "off", 3) == 0) {
+          mode = LOOP_DETECT_OFF;
+        } else if (memcmp(config, "minimal", 7) == 0) {
+          mode = LOOP_DETECT_MINIMAL;
+        } else if (memcmp(config, "moderate", 8) == 0) {
+          mode = LOOP_DETECT_MODERATE;
+        } else if (memcmp(config, "strict", 6) == 0) {
+          mode = LOOP_DETECT_STRICT;
+        } else {
+          mode = 0xFF;
+          strcpy(reply, "Error, must be: off, minimal, moderate, or strict");
+        }
+        if (mode != 0xFF) {
+          _prefs->loop_detect = mode;
+          savePrefs();
+          strcpy(reply, "OK");
+        }
       } else if (memcmp(config, "tx ", 3) == 0) {
         _prefs->tx_power_dbm = atoi(&config[3]);
         savePrefs();
@@ -577,13 +660,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
 #ifdef WITH_RS232_BRIDGE
       } else if (memcmp(config, "bridge.baud ", 12) == 0) {
         uint32_t baud = atoi(&config[12]);
-        if (baud >= 9600 && baud <= 115200) {
+        if (baud >= 9600 && baud <= BRIDGE_MAX_BAUD) {
           _prefs->bridge_baud = (uint32_t)baud;
           _callbacks->restartBridge();
           savePrefs();
           strcpy(reply, "OK");
         } else {
-          strcpy(reply, "Error: baud rate must be between 9600-115200");
+          sprintf(reply, "Error: baud rate must be between 9600-%d",BRIDGE_MAX_BAUD);
         }
 #endif
 #ifdef WITH_ESPNOW_BRIDGE
@@ -691,6 +774,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       LocationProvider * l = _sensors->getLocationProvider();
       if (l != NULL) {
         l->syncTime();
+        strcpy(reply, "ok");
+      } else {
+        strcpy(reply, "gps provider not found");
       }
     } else if (memcmp(command, "gps setloc", 10) == 0) {
       _prefs->node_lat = _sensors->node_lat;
@@ -720,7 +806,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         _prefs->advert_loc_policy = ADVERT_LOC_SHARE;
         savePrefs();
         strcpy(reply, "ok");
-      } else if (memcmp(command+11, "prefs", 4) == 0) {
+      } else if (memcmp(command+11, "prefs", 5) == 0) {
         _prefs->advert_loc_policy = ADVERT_LOC_PREFS;
         savePrefs();
         strcpy(reply, "ok");
@@ -778,6 +864,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       _callbacks->formatRadioStatsReply(reply);
     } else if (sender_timestamp == 0 && memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
       _callbacks->formatStatsReply(reply);
+    } else if (memcmp(command, "rekey", 5) == 0) {
+      strcpy(reply, "rekey is client-initiated");
     } else {
       strcpy(reply, "Unknown command");
     }

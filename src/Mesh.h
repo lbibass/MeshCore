@@ -71,6 +71,14 @@ protected:
   virtual uint8_t getExtraAckTransmitCount() const;
 
   /**
+   * \brief  Select a coding rate for the next-hop peer based on link quality.
+   * \param  hash       the hash of the next-hop peer (from path[0..hash_size-1])
+   * \param  hash_size  bytes per hash entry
+   * \returns  0 = use node default CR, 5-8 = override CR for this packet
+   */
+  virtual uint8_t selectCodingRateForPeer(const uint8_t* hash, uint8_t hash_size) { return 0; }
+
+  /**
    * \brief  Perform search of local DB of peers/contacts.
    * \returns  Number of peers with matching hash
    */
@@ -82,6 +90,17 @@ protected:
    * \param  peer_idx  index of peer, [0..n) where n is what searchPeersByHash() returned
    */
   virtual void getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) { }
+  virtual uint8_t getPeerFlags(int peer_idx) { return 0; }
+  virtual uint16_t getPeerNextAeadNonce(int peer_idx) { return 0; }
+  virtual void onPeerAeadDetected(int peer_idx) { }
+
+  // Session key support (Phase 2)
+  virtual const uint8_t* getPeerSessionKey(int peer_idx) { return NULL; }
+  virtual const uint8_t* getPeerPrevSessionKey(int peer_idx) { return NULL; }
+  virtual void onSessionKeyDecryptSuccess(int peer_idx) { }
+  // Encryption key/nonce for outgoing messages to peer (session key with static ECDH fallback)
+  virtual const uint8_t* getPeerEncryptionKey(int peer_idx, const uint8_t* static_secret) { return static_secret; }
+  virtual uint16_t getPeerEncryptionNonce(int peer_idx) { return getPeerNextAeadNonce(peer_idx); }
 
   /**
    * \brief  A (now decrypted) data packet has been received (by a known peer).
@@ -182,13 +201,13 @@ public:
   RTCClock* getRTCClock() const { return _rtc; }
 
   Packet* createAdvert(const LocalIdentity& id, const uint8_t* app_data=NULL, size_t app_data_len=0);
-  Packet* createDatagram(uint8_t type, const Identity& dest, const uint8_t* secret, const uint8_t* data, size_t len);
+  Packet* createDatagram(uint8_t type, const Identity& dest, const uint8_t* secret, const uint8_t* data, size_t len, uint16_t aead_nonce=0);
   Packet* createAnonDatagram(uint8_t type, const LocalIdentity& sender, const Identity& dest, const uint8_t* secret, const uint8_t* data, size_t data_len);
   Packet* createGroupDatagram(uint8_t type, const GroupChannel& channel, const uint8_t* data, size_t data_len);
   Packet* createAck(uint32_t ack_crc);
   Packet* createMultiAck(uint32_t ack_crc, uint8_t remaining);
-  Packet* createPathReturn(const uint8_t* dest_hash, const uint8_t* secret, const uint8_t* path, uint8_t path_len, uint8_t extra_type, const uint8_t*extra, size_t extra_len);
-  Packet* createPathReturn(const Identity& dest, const uint8_t* secret, const uint8_t* path, uint8_t path_len, uint8_t extra_type, const uint8_t*extra, size_t extra_len);
+  Packet* createPathReturn(const uint8_t* dest_hash, const uint8_t* secret, const uint8_t* path, uint8_t path_len, uint8_t extra_type, const uint8_t*extra, size_t extra_len, uint16_t aead_nonce=0);
+  Packet* createPathReturn(const Identity& dest, const uint8_t* secret, const uint8_t* path, uint8_t path_len, uint8_t extra_type, const uint8_t*extra, size_t extra_len, uint16_t aead_nonce=0);
   Packet* createRawData(const uint8_t* data, size_t len);
   Packet* createTrace(uint32_t tag, uint32_t auth_code, uint8_t flags = 0);
   Packet* createControlData(const uint8_t* data, size_t len);
@@ -196,13 +215,13 @@ public:
   /**
    * \brief  send a locally-generated Packet with flood routing
   */
-  void sendFlood(Packet* packet, uint32_t delay_millis=0);
+  void sendFlood(Packet* packet, uint32_t delay_millis=0, uint8_t path_hash_size=1);
 
   /**
    * \brief  send a locally-generated Packet with flood routing
    * \param transport_codes   array of 2 codes to attach to packet
   */
-  void sendFlood(Packet* packet, uint16_t* transport_codes, uint32_t delay_millis=0);
+  void sendFlood(Packet* packet, uint16_t* transport_codes, uint32_t delay_millis=0, uint8_t path_hash_size=1);
 
   /**
    * \brief  send a locally-generated Packet with Direct routing

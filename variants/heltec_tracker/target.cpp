@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "target.h"
 
+#include <helpers/ArduinoHelpers.h>
 #include <helpers/sensors/MicroNMEALocationProvider.h>
 
 HeltecV3Board board;
@@ -16,7 +17,8 @@ WRAPPER_CLASS radio_driver(radio, board);
 
 ESP32RTCClock fallback_clock;
 AutoDiscoverRTCClock rtc_clock(fallback_clock);
-MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1);
+// GPS_EN (GPIO35) drives N-ch MOSFET → P-ch high-side switch; GPS_RESET (GPIO36) active LOW
+MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1, &rtc_clock, GPS_RESET, GPS_EN, &board.periph_power);
 HWTSensorManager sensors = HWTSensorManager(nmea);
 
 #ifdef DISPLAY_CLASS
@@ -58,18 +60,16 @@ mesh::LocalIdentity radio_new_identity() {
 
 void HWTSensorManager::start_gps() {
   if (!gps_active) {
-    board.periph_power.claim();
-
+    _location->begin();  // Claims periph_power via RefCountedDigitalPin
     gps_active = true;
-    Serial1.println("$CFGSYS,h35155*68");
+    Serial1.println("$CFGSYS,h35155*68");  // Configure GPS for all constellations
   }
 }
 
 void HWTSensorManager::stop_gps() {
   if (gps_active) {
     gps_active = false;
-
-    board.periph_power.release();
+    _location->stop();  // Releases periph_power via RefCountedDigitalPin
   }
 }
 
@@ -87,11 +87,11 @@ bool HWTSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& t
 }
 
 void HWTSensorManager::loop() {
-  static long next_gps_update = 0;
+  static unsigned long next_gps_update = 0;
 
   _location->loop();
 
-  if (millis() > next_gps_update) {
+  if (millis_passed(next_gps_update)) {
     if (gps_active && _location->isValid()) {
       node_lat = ((double)_location->getLatitude())/1000000.;
       node_lon = ((double)_location->getLongitude())/1000000.;

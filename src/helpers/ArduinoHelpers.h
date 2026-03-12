@@ -1,7 +1,17 @@
 #pragma once
 
 #include <Mesh.h>
+#include <MeshCore.h>
 #include <Arduino.h>
+
+// Safe elapsed time calculation that handles clock corrections (when RTC is set backwards).
+// Returns 0 if recorded_timestamp is in the "future" relative to current_time.
+inline uint32_t safeElapsedSecs(uint32_t current_time, uint32_t recorded_timestamp) {
+  if (recorded_timestamp > current_time) {
+    return 0;  // Clock was corrected backwards; treat as "just now"
+  }
+  return current_time - recorded_timestamp;
+}
 
 class VolatileRTCClock : public mesh::RTCClock {
   uint32_t base_time;
@@ -24,6 +34,17 @@ public:
   unsigned long getMillis() override { return millis(); }
 };
 
+/**
+ * \brief  Wrap-safe millis deadline check, handling the 49-day millis() overflow.
+ * \param  target  The deadline timestamp obtained from millis() + delay.
+ * \returns true when the deadline has passed.
+ * \note   Use this instead of \c millis()>=target which fails near the 32-bit wrap.
+ *         Works via signed subtraction (2's complement).
+ */
+inline bool millis_passed(unsigned long target) {
+  return (long)(millis() - target) > 0;
+}
+
 class StdRNG : public mesh::RNG {
 public:
   void begin(long seed) { randomSeed(seed); }
@@ -33,3 +54,17 @@ public:
     }
   }
 };
+
+// Returns true for dirty resets (power-on, watchdog, brownout, panic).
+// Returns false for clean wakes (deep sleep, software restart).
+inline bool wasDirtyReset(mesh::MainBoard& board) {
+#if defined(ESP32)
+  esp_reset_reason_t rst = esp_reset_reason();
+  return (rst != ESP_RST_DEEPSLEEP && rst != ESP_RST_SW);
+#elif defined(NRF52_PLATFORM)
+  return !(board.getResetReason() & POWER_RESETREAS_SREQ_Msk);
+#else
+  (void)board;
+  return true;
+#endif
+}

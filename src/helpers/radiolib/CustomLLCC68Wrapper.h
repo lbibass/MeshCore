@@ -2,6 +2,7 @@
 
 #include "CustomLLCC68.h"
 #include "RadioLibWrappers.h"
+#include "SX126xReset.h"
 
 class CustomLLCC68Wrapper : public RadioLibWrapper {
 public:
@@ -15,8 +16,12 @@ public:
   float getLastRSSI() const override { return ((CustomLLCC68 *)_radio)->getRSSI(); }
   float getLastSNR() const override { return ((CustomLLCC68 *)_radio)->getSNR(); }
 
+  void setCodingRate(uint8_t cr) override { ((CustomLLCC68 *)_radio)->setCodingRate(cr); }
+
   float packetScore(float snr, int packet_len) override {
     int sf = ((CustomLLCC68 *)_radio)->spreadingFactor;
     return packetScoreInt(snr, sf, packet_len);
   }
+
+  void doResetAGC() override { sx126xResetAGC((SX126x *)_radio); }
 };
