@@ -166,6 +166,7 @@ void NRF52Board::enterSystemOff(uint8_t reason) {
       sd_enabled = 0;
     }
   }
+  shutdownPeripherals();
 
   if (!sd_enabled) {
     // SoftDevice not available; write directly to POWER->SYSTEMOFF
